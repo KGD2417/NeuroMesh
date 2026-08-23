@@ -1,0 +1,46 @@
+name: neuromesh
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: neuromesh
+      POSTGRES_PASSWORD: neuromesh
+      POSTGRES_DB: neuromesh
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neuromesh"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    # appendonly so a restart mid-demo does not drop the queue on the floor
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: ["redisdata:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./server
+    ports: ["8000:8000"]
+    environment:
+      NEUROMESH_ENV: dev
+      NEUROMESH_DATABASE_DSN: postgresql+asyncpg://neuromesh:neuromesh@postgres:5432/neuromesh
+      NEUROMESH_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers"
+
+volumes:
+  pgdata:
+  redisdata:

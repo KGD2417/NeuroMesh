@@ -1,0 +1,20 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# android / gradle
+.gradle/
+build/
+local.properties
+*.apk
+*.iml
+.idea/
+captures/
+
+# The .tflite assets ARE committed (~4 MB): a phone-only demo must be able to
+# build the APK without a TensorFlow install. Regenerate with tools/make_models.py.
+
+# local env
+.env

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The demo runs on four phones on one hotspot: the orchestrator is a private
+  LAN address with no certificate and no DNS. Cleartext is limited to that.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

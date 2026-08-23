@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">NeuroMesh</string>
+    <string name="provider_channel_name">Providing compute</string>
+    <string name="provider_channel_description">Shown while this phone is earning credits.</string>
+</resources>
