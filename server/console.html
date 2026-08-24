@@ -1,0 +1,199 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>NeuroMesh console</title>
+<style>
+  :root { color-scheme: dark; --bg:#0d0f13; --fg:#e6e9ef; --dim:#8b93a3; --line:#242a35; --ok:#3fb950; --run:#d29922; --bad:#f85149; }
+  * { box-sizing: border-box }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--fg);
+         font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
+  h1 { font-size:18px; margin:0 0 4px }
+  h2 { font-size:13px; color:var(--dim); margin:24px 0 8px; text-transform:uppercase; letter-spacing:.08em }
+  input,select,button { font:inherit; background:#161a21; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 10px }
+  button { cursor:pointer } button:hover { border-color:#3d4756 }
+  button.primary { background:#1f6feb; border-color:#1f6feb }
+  table { border-collapse:collapse; width:100% }
+  td,th { text-align:left; padding:6px 12px 6px 0; border-bottom:1px solid var(--line) }
+  th { color:var(--dim); font-weight:400 }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px }
+  .grid { display:flex; flex-wrap:wrap; gap:4px; margin:8px 0 }
+  .cell { width:26px; height:26px; border-radius:4px; background:#1c222c; border:1px solid var(--line);
+          display:flex; align-items:center; justify-content:center; font-size:10px; color:var(--dim) }
+  .cell.claimed { background:#3d2f0b; border-color:var(--run); color:var(--run) }
+  .cell.done { background:#122b17; border-color:var(--ok); color:var(--ok) }
+  .cell.failed { background:#3d1418; border-color:var(--bad); color:var(--bad) }
+  pre { background:#12161d; border:1px solid var(--line); border-radius:6px; padding:12px; overflow:auto; max-height:260px }
+  .dim { color:var(--dim) } .bad { color:var(--bad) }
+  section { max-width:880px }
+</style>
+<section>
+<h1>NeuroMesh console</h1>
+<div class="dim">consumer side in a browser: pair the phone, send it work, watch the shards land</div>
+
+<h2>Connect</h2>
+<div class="row">
+  <input id="base" size="26" placeholder="http://localhost:8000">
+  <input id="email" size="24" placeholder="email">
+  <input id="pw" type="password" size="18" placeholder="password">
+  <button class="primary" onclick="auth('login')">Sign in</button>
+  <button onclick="auth('register')">Register</button>
+  <button onclick="signOut()">Sign out</button>
+</div>
+<div id="autherr" class="bad"></div>
+
+<div id="app" hidden>
+  <h2>Devices <button onclick="pair()">Get pairing code</button> <span id="code"></span></h2>
+  <table id="devices"><tbody><tr><td class="dim">loading...</td></tr></tbody></table>
+
+  <h2>Submit a job</h2>
+  <div class="row">
+    <select id="model"></select>
+    <input id="items" type="number" value="120" min="1" size="6" title="items">
+    <input id="shard" type="number" value="8" min="1" size="4" title="shard size">
+    <button class="primary" onclick="submit()">Send to fleet</button>
+    <span id="quote" class="dim"></span>
+  </div>
+  <div id="joberr" class="bad"></div>
+
+  <h2>Job <span id="jobid" class="dim"></span> <button onclick="cancel()">Cancel</button></h2>
+  <div id="jobstat" class="dim">no job yet</div>
+  <div class="grid" id="grid"></div>
+  <pre id="result" hidden></pre>
+</div>
+</section>
+<script>
+const $ = id => document.getElementById(id);
+let tok = localStorage.tok || "";
+let base = localStorage.base || "http://localhost:8000";
+let job = null, models = [];
+$("base").value = base;
+$("email").value = localStorage.email || "";
+
+async function api(path, opts = {}) {
+  const r = await fetch(base + path, {
+    ...opts,
+    headers: { "content-type": "application/json", ...(tok ? { authorization: "Bearer " + tok } : {}), ...opts.headers },
+  });
+  const body = r.status === 204 ? null : await r.json().catch(() => null);
+  if (!r.ok) throw new Error(body && body.detail ? JSON.stringify(body.detail) : r.status + " " + r.statusText);
+  return body;
+}
+
+async function auth(kind) {
+  $("autherr").textContent = "";
+  base = localStorage.base = ($("base").value.replace(/\/$/, "") || "http://localhost:8000");
+  try {
+    const t = await api("/auth/" + kind, {
+      method: "POST",
+      body: JSON.stringify({ email: $("email").value, password: $("pw").value }),
+    });
+    tok = localStorage.tok = t.access_token;
+    localStorage.email = $("email").value;
+    await start();
+  } catch (e) { $("autherr").textContent = e.message; }
+}
+
+function signOut() {
+  tok = localStorage.tok = "";
+  $("app").hidden = true;
+}
+
+async function start() {
+  $("app").hidden = false;
+  models = await api("/jobs/models");
+  $("model").innerHTML = models.map(m => `<option value="${m.ref}">${m.ref} - ${m.min_tier_label}</option>`).join("");
+  $("model").onchange = quote;
+  $("items").oninput = quote;
+  quote();
+  tick();
+}
+
+function quote() {
+  const m = models.find(x => x.ref === $("model").value);
+  const n = +$("items").value || 0;
+  $("quote").textContent = m
+    ? `${n} items x ${m.price_per_item_mc} mC = ${(n * m.price_per_item_mc / 1000).toFixed(3)} credits, needs ${m.min_tier_label}`
+    : "";
+}
+
+async function pair() {
+  const c = await api("/devices/pairing-code", { method: "POST" });
+  $("code").innerHTML = `<b>${c.code}</b> <span class="dim">expires in ${c.expires_in_s}s - type it into the phone</span>`;
+}
+
+const ago = ts => {
+  if (!ts) return "never";
+  const s = Math.round((Date.now() - new Date(ts)) / 1000);
+  return s < 60 ? s + "s ago" : s < 3600 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago";
+};
+
+async function renderDevices() {
+  const d = await api("/me/devices");
+  if (!d.length) {
+    $("devices").innerHTML = `<tbody><tr><td class="dim">no devices paired - tap "Get pairing code" and type it into the phone</td></tr></tbody>`;
+    return;
+  }
+  $("devices").innerHTML = "<tbody><tr><th>device</th><th>tier</th><th>state</th><th>heartbeat</th><th>shards</th><th>earned</th></tr>" +
+    d.map(x => `<tr>
+      <td>${x.name}</td><td>${x.tier}</td>
+      <td><span class="dot" style="background:${x.eligible ? "var(--ok)" : x.online ? "var(--run)" : "var(--bad)"}"></span>${
+        x.eligible ? "computing" : x.online ? "online, not eligible" : "offline"}</td>
+      <td class="dim">${ago(x.last_heartbeat_at)}</td>
+      <td>${x.shards_completed}</td><td>${(x.earned_mc / 1000).toFixed(3)}</td>
+    </tr>`).join("") + "</tbody>";
+}
+
+// Mirrors AppViewModel.syntheticInputs so the console and the app submit the same shapes.
+const ZERO_IMAGE = "AAAA".repeat(224 * 224 * 3 / 3);
+const SENTENCES = [
+  "the phone in your pocket has a neural processor",
+  "idle silicon is the cheapest compute there is",
+  "forty tops, plugged in, doing nothing all night",
+  "a fleet of phones is a datacenter nobody built",
+  "inference only, never training, by design",
+];
+function inputsFor(kind, n) {
+  if (kind === "float_vector") return Array.from({ length: n }, () => Array.from({ length: 64 }, Math.random));
+  if (kind === "image_rgb") return Array(n).fill(ZERO_IMAGE);
+  return Array.from({ length: n }, (_, i) => SENTENCES[i % SENTENCES.length] + " #" + i);
+}
+
+async function submit() {
+  $("joberr").textContent = "";
+  $("result").hidden = true;
+  const m = models.find(x => x.ref === $("model").value);
+  try {
+    job = await api("/jobs", {
+      method: "POST",
+      body: JSON.stringify({ model_ref: m.ref, inputs: inputsFor(m.input_kind, +$("items").value), shard_size: +$("shard").value }),
+    });
+    $("jobid").textContent = job.id.slice(0, 8);
+  } catch (e) { $("joberr").textContent = e.message; }
+}
+
+async function cancel() {
+  if (job) await api(`/jobs/${job.id}/cancel`, { method: "POST" });
+}
+
+// Polling, not SSE: EventSource cannot send an Authorization header, and
+// GET /jobs/{id} already overlays the same Redis hot state the stream carries.
+async function tick() {
+  try {
+    await renderDevices();
+    if (job) {
+      const j = await api("/jobs/" + job.id);
+      $("jobstat").textContent = `${j.status} - ${j.shards_done}/${j.shard_count} done, ${j.shards_claimed} running, ${j.shards_failed} failed, ${(j.cost_mc / 1000).toFixed(3)} credits escrowed`;
+      $("grid").innerHTML = j.shards.map(s =>
+        `<div class="cell ${s.state}" title="shard ${s.index}: ${s.state}${s.device_id ? " on " + s.device_id.slice(0, 8) : ""}">${s.index}</div>`).join("");
+      if (j.status === "completed" && $("result").hidden) {
+        const r = await api(`/jobs/${job.id}/result`);
+        $("result").textContent = JSON.stringify(r, null, 2).slice(0, 4000);
+        $("result").hidden = false;
+      }
+    }
+  } catch (e) { $("jobstat").textContent = e.message; }
+  setTimeout(tick, 1500);
+}
+
+if (tok) start().catch(signOut);
+</script>

@@ -23,6 +23,7 @@ cool.
 |---|---|---|
 | Orchestrator API | `server/` | FastAPI on port 8000 |
 | Android app | `android/` | Kotlin, Jetpack Compose, foreground service, LiteRT |
+| Browser console | `server/console.html` | consumer side in a browser, served at `/console` |
 | Shared rules | `server/common/` | pricing, tiers, shard/log schemas, model allow-list |
 | Postgres | container | users, devices, jobs, shards, ledger |
 | Redis | container | shard queue, atomic claim, leases, payloads, live progress |
@@ -38,27 +39,173 @@ lets the whole demo run on phones.
 
 ## Run it
 
-### Server
+Four things to start, in this order: Docker Desktop, the stack, the APK, the
+phone. The commands below are the Windows path, verified end to end against a
+Samsung S20 FE; every error each step can throw is in **Troubleshooting**.
+
+### 0. Prerequisites
+
+| Need | Why | Check |
+|---|---|---|
+| Docker Desktop | postgres + redis + api | `docker --version` |
+| JDK 17 or newer | Gradle build | `java -version` |
+| Android SDK platform-tools | `adb` | see step 4 |
+| uv + Python 3.12 | tests and model regeneration only | `uv --version` |
+
+You do **not** need Android Studio, and you do **not** need TensorFlow — the
+`.tflite` assets are committed.
+
+### 1. Start the orchestrator
+
+Docker Desktop must actually be *running*, not just installed. A stopped daemon
+fails with `open //./pipe/dockerDesktopLinuxEngine: The system cannot find the
+file specified`, which reads like a missing file and is really a missing daemon.
 
 ```bash
-docker compose up -d          # postgres + redis + api, migrations run on boot
-curl localhost:8000/health
+docker compose up -d
 ```
 
-`/health` touches both stores for real. A green check that never opened a
-connection is how a demo dies on stage.
+First run pulls two images and builds the API; expect a couple of minutes.
+Migrations run on API boot, so there is no separate migrate step.
 
-### Tests
+```bash
+curl.exe -s http://localhost:8000/health
+```
+
+Expect `{"ok":true,"postgres":true,"redis":true,...}`. `ok:true` means both
+stores were opened for real — a green check that never touched the database is
+how a demo dies on stage.
+
+> **PowerShell:** use `curl.exe`, not `curl`. In Windows PowerShell `curl` is an
+> alias for `Invoke-WebRequest`, which takes different flags and errors on `-s`.
+> Or use `irm http://localhost:8000/health`.
+
+### 2. The browser console
+
+```
+http://localhost:8000/console
+```
+
+Served by the API itself, so there is no second process to run and no CORS
+origin to get wrong. Sign in or register, and you get the device table (tier,
+online, eligible, heartbeat age, shards, earnings — refreshing continuously), a
+pairing-code button, job submission, a live shard grid, and the result.
+
+It exists because of a real constraint: a provider phone only computes with its
+**screen off**, so you cannot watch the phone work on the phone. The console is
+the window into a fleet that is by definition not looking back at you.
+
+### 3. Tests
+
+The stack from step 1 must be up — the suite runs against the real Postgres and
+the real Redis, in a separate `neuromesh_test` database it creates itself.
 
 ```bash
 cd server
-uv venv --python 3.12 && uv pip install -r pyproject.toml --extra dev
-.venv/Scripts/python -m pytest -q      # 30 tests
+uv venv --python 3.12
+uv pip install -r pyproject.toml --extra dev
+./.venv/Scripts/python.exe -m pytest -q      # 30 passed
 ```
 
-They run against the real Postgres and the real Redis, not sqlite and not
-fakeredis: the two things most worth testing here are a Lua script and a row
-lock, and neither exists in a fake.
+Not sqlite and not fakeredis: the two things most worth testing here are a Lua
+script and a row lock, and neither exists in a fake.
+
+### 4. Build and install the APK
+
+**`adb` is not on PATH by default on Windows.** It lives in the SDK:
+
+```bash
+export PATH="$PATH:/c/Users/YOU/AppData/Local/Android/Sdk/platform-tools"   # Git Bash
+$env:PATH += ";$env:LOCALAPPDATA\Android\Sdk\platform-tools"                # PowerShell
+adb devices          # your phone should be listed as "device"
+```
+
+If the list is empty: Settings → About phone → Software information → tap
+*Build number* seven times → Developer options → **USB debugging** on, and set
+the USB mode to file transfer rather than charging-only. If it says
+`unauthorized`, unlock the phone and accept the RSA prompt.
+
+**`android/local.properties` is gitignored**, so a fresh clone has no `sdk.dir`
+and Gradle fails with `SDK location not found`. Create it:
+
+```
+sdk.dir=C:/Users/YOU/AppData/Local/Android/Sdk
+```
+
+Forward slashes even on Windows — a backslash is an escape character in a Java
+properties file.
+
+Now pick how the phone reaches the orchestrator. **Two options, and choosing
+wrong is the most common silent failure**: the app builds and installs fine, and
+then simply cannot connect.
+
+**Option A — USB tunnel. Recommended for one phone.** No firewall rule, no IP to
+look up, works on any network:
+
+```bash
+cd android
+./gradlew assembleDebug -Pneuromesh.orchestrator=http://127.0.0.1:8000
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb reverse tcp:8000 tcp:8000
+```
+
+`adb reverse` forwards port 8000 on the phone back to your PC over the cable, so
+`127.0.0.1:8000` on the phone *is* your machine. Verify from the phone itself:
+
+```bash
+adb shell curl -s http://127.0.0.1:8000/health
+```
+
+It does **not** survive a reboot or an unplug. Re-run that one line after either.
+
+**Option B — LAN address. Required for more than one phone.** Find your IPv4 and
+open the port. The firewall rule needs an admin PowerShell, and without it
+Windows drops the phone's connection with no message anywhere:
+
+```powershell
+Get-NetRoute -DestinationPrefix '0.0.0.0/0' | ForEach-Object { (Get-NetIPAddress -ifIndex $_.ifIndex -AddressFamily IPv4).IPAddress }
+New-NetFirewallRule -DisplayName "NeuroMesh 8000" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
+```
+
+```bash
+./gradlew assembleDebug -Pneuromesh.orchestrator=http://192.168.1.7:8000
+```
+
+Phone and PC must be on the same Wi-Fi, and it must not be a guest network with
+client isolation. The address is a build property so a fleet can be flashed once
+and never typed into; it is editable on the Setup screen either way.
+
+> From PowerShell the wrapper is `.\gradlew.bat`, not `./gradlew`.
+
+### 5. On the phone
+
+1. **Setup screen.** The Orchestrator field is prefilled with whatever you baked
+   in at build time. Enter an email and a password (8 characters minimum), flip
+   the switch to **Create a new account** the first time, tap **Create account**.
+   New accounts get a signup grant, so you can submit a job before earning
+   anything.
+2. **"One app, two sides".** Tap **Choose** under **Provide compute**.
+3. **Join the fleet.** A phone is attached to no account until it redeems a
+   pairing code. Tap **Get a code**, or mint one in the browser console, then
+   type the eight characters into **Pairing code** and tap **Pair this phone**.
+   The device key it returns is stored only on this phone.
+4. **Tap "Start providing".** A foreground-service notification appears.
+5. **Check the "Your phone comes first" card.** Four dots, and *all four* must be
+   lit before a single shard is claimed:
+
+   ```
+   ● Charging              plug it in
+   ● Unmetered Wi-Fi       Wi-Fi on, and not a metered hotspot
+   ○ Screen off            you are looking at the screen
+   ● Cool (0 ≤ 1)          at or below THERMAL_LIGHT
+   ```
+
+   Three of four while you hold the phone is correct and expected.
+6. **Submit a job** — from the browser console, from a second phone, or from this
+   phone via **Switch mode** → **Submit a job**. 120 items at shard size 8 is 15
+   shards.
+7. **Turn the phone's screen off.** Within about five seconds the console row
+   flips to *computing* and the shard grid starts filling in.
 
 ### Rehearsal without phones
 
@@ -67,22 +214,27 @@ python tools/simulate_fleet.py --devices 3 --items 120 --shard-size 8
 python tools/simulate_fleet.py --devices 3 --items 64 --drop 1   # failure drill
 ```
 
-The drill yanks a phone while it holds a shard. Expected: the lease expires,
-the reaper requeues it, another phone runs it, the job still completes with
-every output in order, and the phone that walked away earns nothing.
+The drill yanks a phone while it holds a shard. Expected: the lease expires, the
+reaper requeues it, another phone runs it, the job still completes with every
+output in order, and the phone that walked away earns nothing.
 
-### APK
+### Troubleshooting
 
-```bash
-cd android
-./gradlew assembleDebug -Pneuromesh.orchestrator=http://192.168.1.7:8000
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-The orchestrator address is a build property so the four phones can be flashed
-once and not typed into. It is editable on the Setup screen either way.
-
----
+| Symptom | Cause | Fix |
+|---|---|---|
+| `open //./pipe/dockerDesktopLinuxEngine` | Docker Desktop is not running | Start it and wait for the engine |
+| `curl: A parameter cannot be found that matches '-s'` | PowerShell aliases `curl` to `Invoke-WebRequest` | Use `curl.exe`, or `irm` |
+| `SDK location not found` | `local.properties` is gitignored | Create it with `sdk.dir=`, forward slashes |
+| `adb: command not found` | platform-tools not on PATH | Add `%LOCALAPPDATA%\Android\Sdk\platform-tools` |
+| `adb devices` is empty | USB debugging off, or a charge-only cable/mode | Developer options → USB debugging; USB mode → file transfer |
+| `adb devices` says `unauthorized` | RSA prompt not accepted | Unlock the phone, tap Allow |
+| App shows a connection error | Wrong orchestrator address for your setup | Option A: re-run `adb reverse tcp:8000 tcp:8000`. Option B: add the firewall rule, confirm same Wi-Fi |
+| Worked, then broke after a reboot or unplug | `adb reverse` is not persistent | Re-run `adb reverse tcp:8000 tcp:8000` |
+| **Started providing and nothing happens** | One of the four conditions is false — nearly always *screen off* | Plug in, Wi-Fi on, screen off. Read the conditions card |
+| Console shows *online, not eligible* | Same thing: it is heartbeating but will not claim | Same fix |
+| `402 Payment Required` on submit | Out of credits | Register a fresh account for the grant, or provide compute to earn |
+| Job stays `queued` forever | No eligible device at or above the job's tier | Check the console device table; `sweep-mlp-fp16` needs tier 1 (GPU fp16) |
+| Tests fail to connect | Stack not up | `docker compose up -d` first — the suite uses the real stores |
 
 ## Demo run book
 
@@ -101,6 +253,11 @@ once and not typed into. It is editable on the Setup screen either way.
 6. **The drill.** Mid-job, unplug one provider. Its cell goes back to queued
    within the 30-second lease and another phone picks it up. The run does not
    lose a single output.
+
+On a single phone wired over USB, do not use the unplug drill — the cable is
+both the charger and the network link, so unplugging tests two things at once.
+Wake the screen instead: `screen_off` goes false, the phone abandons its shard,
+the lease expires, the reaper requeues it. Screen off again and it re-claims.
 
 ---
 
@@ -231,6 +388,7 @@ DELETE /devices/{id}                revoke a lost phone
 
 GET    /me  /me/devices  /me/jobs  /me/ledger  /me/reconcile
 GET    /health
+GET    /console                      the browser consumer console
 ```
 
 Device API keys are stored as a sha256 digest. The plaintext is returned once,

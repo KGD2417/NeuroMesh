@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import pathlib
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy import text as sql_text
 
 from api import auth, devices, jobs, me
@@ -57,6 +59,13 @@ app.include_router(auth.router)
 app.include_router(jobs.router)
 app.include_router(devices.router)
 app.include_router(me.router)
+
+
+@app.get("/console", include_in_schema=False)
+async def console() -> FileResponse:
+    """A browser consumer console, served by the API that it talks to, so there
+    is no second process to remember and no CORS origin to get wrong."""
+    return FileResponse(pathlib.Path(__file__).parent / "console.html")
 
 
 @app.get("/health", tags=["ops"])
